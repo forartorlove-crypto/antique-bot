@@ -1,4 +1,2 @@
 aiogram==3.*
-python-dotenv  # если используешь .env
-.env
-pycache
+python-dotenv  
