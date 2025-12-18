@@ -6,29 +6,23 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
+from dotenv import load_dotenv   # ← эта строка
+import os                        # ← и эта
 
-# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-# Добавляем эти строки СЮДА (после всех import ...):
-from dotenv import load_dotenv
-import os
-
-load_dotenv()  # Загружаем переменные из .env файла
-API_TOKEN = "8368261635:AAFG-cKTwyxMieGXDf-J_N_gMsNWucGzsbY"
-EXPERT_ID = 756072761
-# ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+load_dotenv()                    # ← эти две строки
+API_TOKEN = os.getenv("API_TOKEN")
+EXPERT_ID = int(os.getenv("EXPERT_ID"))
 
 import asyncio
 
-# Настройки (теперь токен и ID берутся из .env)
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(
-    token=API_TOKEN,
+    token=API_TOKEN,             # ← используем переменную, а не строку с токеном
     default=DefaultBotProperties(parse_mode="HTML")
 )
 dp = Dispatcher()
 
-# ... дальше весь остальной код бота без изменений
 # --- Состояния ---
 class Form(StatesGroup):
     waiting_photos = State()       # Ожидание фото (в начале)
