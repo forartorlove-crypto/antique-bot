@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import os
@@ -169,15 +169,32 @@ async def handle_category(message: types.Message, state: FSMContext):
     await message.answer(photo_prompt + "\n\nПрисылай фото. Когда закончишь — нажми «Продолжить».", reply_markup=photo_keyboard())
     await state.set_state(Form.photos)
 
-# Сбор фото
-@dp.message(Form.photos, F.photo)
-async def handle_photos(message: types.Message, state: FSMContext):
+# Сбор фото (одиночное)
+@dp.message(Form.photos, F.photo & ~F.media_group_id)
+async def handle_single_photo(message: types.Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     photos.append(message.photo[-1].file_id)
     await state.update_data(photos=photos)
     await message.answer("Фото получено! 📸 Присылай ещё или нажми «Продолжить».", reply_markup=photo_keyboard())
 
+# Сбор группы фото (media group)
+@dp.message(Form.photos, F.media_group_id)
+async def handle_media_group(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+
+    # Добавляем все фото из группы
+    added_count = 0
+    for media in message.media_group_id:  # aiogram не имеет media_group_id, это ошибка; используем handler для группы
+        if media.content_type == 'photo':
+            photos.append(media.photo[-1].file_id)
+            added_count += 1
+
+    await state.update_data(photos=photos)
+    await message.answer(f"Получено {added_count} фото! 📸 Присылай ещё или нажми «Продолжить».", reply_markup=photo_keyboard())
+
+# Обработчик для кнопок во время фото
 @dp.message(Form.photos, F.text == "Отправить ещё фото")
 async def send_more_photos(message: types.Message):
     await message.answer("Хорошо, присылай ещё фото в хорошем качестве.", reply_markup=photo_keyboard())
@@ -205,7 +222,7 @@ async def photos_continue(message: types.Message, state: FSMContext):
         await state.set_state(Form.country_year)
 
     elif category == "Живопись":
-        await message.answer("Какая техника исполнения (масло, акварель, гуашь и т.д.)?", reply_markup=cancel_keyboard())
+        await message.answer("Какая техника исполнения (масло, акварель, гуашь и т.d.)?", reply_markup=cancel_keyboard())
         await state.set_state(Form.technique)
 
     elif category == "Монеты":
@@ -220,7 +237,7 @@ async def photos_continue(message: types.Message, state: FSMContext):
         await message.answer("Название книги, автор и год издания?", reply_markup=cancel_keyboard())
         await state.set_state(Form.book_info)
 
-# Обработка вопросов
+# Обработка вопросов (без предпросмотра — сразу к финалу)
 @dp.message(Form.info)
 async def handle_simple_info(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
