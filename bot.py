@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import os
@@ -75,7 +75,6 @@ class Form(StatesGroup):
     country_year = State()
     book_info = State()
     detailed_info = State()
-    preview = State()
 
 # Клавиатуры
 def category_keyboard():
@@ -149,7 +148,7 @@ async def handle_category(message: types.Message, state: FSMContext):
     if category == "Автографы":
         photo_prompt += "Сфотографируй общий вид предмета и отдельно крупно сам автограф."
     elif category == "Боны":
-        photo_prompt += "Сфотографируй банкноту с двух сторон."
+        photo_prompt += "Сфотографируй бону с двух сторон."
     elif category == "Живопись":
         photo_prompt += "Сделай общее фото картины, фото обратной стороны и крупно подпись (если она есть)."
     elif category == "Марки":
@@ -227,7 +226,7 @@ async def handle_simple_info(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         return await cancel(message, state)
     await state.update_data(simple_info=message.text)
-    await show_preview(message, state)
+    await finalize_case(message, state)
 
 @dp.message(Form.country_year)
 async def handle_country_year(message: types.Message, state: FSMContext):
@@ -263,7 +262,7 @@ async def handle_detailed_info(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         return await cancel(message, state)
     await state.update_data(detailed_info=message.text)
-    await show_preview(message, state)
+    await finalize_case(message, state)
 
 @dp.message(Form.material_weight)
 async def handle_material_weight(message: types.Message, state: FSMContext):
@@ -278,59 +277,7 @@ async def handle_book_info(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         return await cancel(message, state)
     await state.update_data(book_info=message.text)
-    await show_preview(message, state)
-
-# Предпросмотр
-async def show_preview(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    photos_count = len(data.get("photos", []))
-
-    preview_text = "<b>Проверь заявку перед отправкой:</b>\n\n"
-    preview_text += f"<b>Категория:</b> {data.get('category')}\n"
-    preview_text += f"<b>Фото:</b> {photos_count} шт.\n\n"
-
-    if "country_year" in data:
-        preview_text += f"<b>Страна и год:</b> {data['country_year']}\n"
-    if "technique" in data:
-        preview_text += f"<b>Техника:</b> {data['technique']}\n"
-    if "size" in data:
-        preview_text += f"<b>Размер:</b> {data['size']}\n"
-    if "detailed_info" in data:
-        preview_text += f"<b>Подробная информация:</b> {data['detailed_info']}\n"
-    if "material_weight" in data:
-        preview_text += f"<b>Материал и вес:</b> {data['material_weight']}\n"
-    if "book_info" in data:
-        preview_text += f"<b>Книга:</b> {data['book_info']}\n"
-    if "simple_info" in data:
-        preview_text += f"<b>Дополнительно:</b> {data['simple_info']}\n"
-
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("Отправить заявку ✅", callback_data="send_application"))
-    keyboard.add(InlineKeyboardButton("Добавить ещё фото или информацию", callback_data="add_more"))
-    keyboard.add(InlineKeyboardButton("Отмена ❌", callback_data="cancel_application"))
-
-    await message.answer(preview_text, reply_markup=keyboard)
-    await state.set_state(Form.preview)
-
-# Кнопки предпросмотра
-@dp.callback_query(Form.preview, F.data == "send_application")
-async def send_application(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await finalize_case(callback.message, state)
-    await callback.answer()
-
-@dp.callback_query(Form.preview, F.data == "add_more")
-async def add_more(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer("Присылай дополнительные фото или информацию. Когда будет готово — я снова покажу предпросмотр.", reply_markup=photo_keyboard())
-    await state.set_state(Form.photos)
-    await callback.answer()
-
-@dp.callback_query(Form.preview, F.data == "cancel_application")
-async def cancel_preview(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await cancel(callback.message, state)
-    await callback.answer()
+    await finalize_case(message, state)
 
 # Финализация с БД
 async def finalize_case(message: types.Message, state: FSMContext):
