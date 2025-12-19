@@ -1,21 +1,19 @@
-# bot.py
 import logging
 import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 import os
 from datetime import datetime
+import asyncio
 
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
 EXPERT_ID = int(os.getenv("EXPERT_ID"))
-
-import asyncio
 
 logging.basicConfig(filename='bot.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
@@ -87,7 +85,7 @@ def category_keyboard():
     ]
     kb = [[KeyboardButton(text=text) for text in row] for row in buttons]
     kb.append([KeyboardButton(text="Отмена")])
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, one_time_keyboard=True)
 
 def photo_keyboard():
     return ReplyKeyboardMarkup(
@@ -95,11 +93,12 @@ def photo_keyboard():
             [KeyboardButton(text="Отправить ещё фото"), KeyboardButton(text="Продолжить")],
             [KeyboardButton(text="Отмена")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=False  # Оставляем, чтобы пользователь мог повторять
     )
 
 def cancel_keyboard():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Отмена")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Отмена")]], resize_keyboard=True, one_time_keyboard=True)
 
 # Установка кнопки меню справа
 async def set_commands():
@@ -113,7 +112,7 @@ async def set_commands():
 async def start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "Привет! 😊 Я помогу тебе отправить <b>один предмет</b> на оценку нашему эксперту по антиквариату.\n\n"
+        "Привет! 😊 Я помогу тебе отправить один предмет на оценку нашему эксперту по антиквариату.\n\n"
         "Это займёт всего 2–3 минуты, и ты получишь предварительную оценку бесплатно.\n\n"
         "Для начала выбери категорию предмета:",
         reply_markup=category_keyboard()
@@ -141,7 +140,7 @@ async def handle_category(message: types.Message, state: FSMContext):
         await message.answer("Выбери, пожалуйста, категорию из предложенных ниже 👇", reply_markup=category_keyboard())
         return
 
-    await state.update_data(category=category, photos=[])
+    await state.update_data(category=category, photos=[], last_media_group_id=None, photo_count_in_group=0)
 
     photo_prompt = "📸 Чтобы эксперт мог дать точную оценку, пришли фото в хорошем качестве и при дневном освещении (без вспышки).\n\n"
 
@@ -169,32 +168,34 @@ async def handle_category(message: types.Message, state: FSMContext):
     await message.answer(photo_prompt + "\n\nПрисылай фото. Когда закончишь — нажми «Продолжить».", reply_markup=photo_keyboard())
     await state.set_state(Form.photos)
 
-# Сбор фото (одиночное)
-@dp.message(Form.photos, F.photo & ~F.media_group_id)
-async def handle_single_photo(message: types.Message, state: FSMContext):
+# Сбор фото с улучшенной обработкой групп
+@dp.message(Form.photos, F.photo)
+async def handle_photos(message: types.Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
+    last_media_group_id = data.get("last_media_group_id")
+    photo_count_in_group = data.get("photo_count_in_group", 0)
+
     photos.append(message.photo[-1].file_id)
-    await state.update_data(photos=photos)
-    await message.answer("Фото получено! 📸 Присылай ещё или нажми «Продолжить».", reply_markup=photo_keyboard())
+    added_count = 1
 
-# Сбор группы фото (media group)
-@dp.message(Form.photos, F.media_group_id)
-async def handle_media_group(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    photos = data.get("photos", [])
-
-    # Добавляем все фото из группы
-    added_count = 0
-    for media in message.media_group_id:  # aiogram не имеет media_group_id, это ошибка; используем handler для группы
-        if media.content_type == 'photo':
-            photos.append(media.photo[-1].file_id)
-            added_count += 1
+    if message.media_group_id:
+        if message.media_group_id == last_media_group_id:
+            photo_count_in_group += 1
+            added_count = photo_count_in_group
+            # Не отправляем сообщение сразу, ждём конца группы (workaround: задержка)
+            await asyncio.sleep(0.5)  # Ждём, чтобы убедиться, что группа закончилась
+        else:
+            photo_count_in_group = 1
+            added_count = 1
+        await state.update_data(last_media_group_id=message.media_group_id, photo_count_in_group=photo_count_in_group)
 
     await state.update_data(photos=photos)
-    await message.answer(f"Получено {added_count} фото! 📸 Присылай ещё или нажми «Продолжить».", reply_markup=photo_keyboard())
 
-# Обработчик для кнопок во время фото
+    # Отправляем сообщение только если это не группа или конец группы
+    if not message.media_group_id or added_count > 1:  # Простой хак: если >1, предполагаем конец
+        await message.answer(f"Получено {len(photos)} фото всего! 📸 Присылай ещё или нажми «Продолжить».", reply_markup=photo_keyboard())
+
 @dp.message(Form.photos, F.text == "Отправить ещё фото")
 async def send_more_photos(message: types.Message):
     await message.answer("Хорошо, присылай ещё фото в хорошем качестве.", reply_markup=photo_keyboard())
@@ -222,7 +223,7 @@ async def photos_continue(message: types.Message, state: FSMContext):
         await state.set_state(Form.country_year)
 
     elif category == "Живопись":
-        await message.answer("Какая техника исполнения (масло, акварель, гуашь и т.d.)?", reply_markup=cancel_keyboard())
+        await message.answer("Какая техника исполнения (масло, акварель, гуашь и т.д.)?", reply_markup=cancel_keyboard())
         await state.set_state(Form.technique)
 
     elif category == "Монеты":
@@ -237,12 +238,12 @@ async def photos_continue(message: types.Message, state: FSMContext):
         await message.answer("Название книги, автор и год издания?", reply_markup=cancel_keyboard())
         await state.set_state(Form.book_info)
 
-# Обработка вопросов (без предпросмотра — сразу к финалу)
+# Обработка вопросов (унифицировал на "additional_info" вместо "simple_info")
 @dp.message(Form.info)
-async def handle_simple_info(message: types.Message, state: FSMContext):
+async def handle_info(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         return await cancel(message, state)
-    await state.update_data(simple_info=message.text)
+    await state.update_data(additional_info=message.text)
     await finalize_case(message, state)
 
 @dp.message(Form.country_year)
@@ -296,9 +297,35 @@ async def handle_book_info(message: types.Message, state: FSMContext):
     await state.update_data(book_info=message.text)
     await finalize_case(message, state)
 
-# Финализация с БД
+# Функция ответа эксперта (исправлен парсинг)
+@dp.message(F.from_user.id == EXPERT_ID, F.reply_to_message)
+async def expert_reply(message: types.Message):
+    if message.reply_to_message:
+        try:
+            text = message.reply_to_message.text
+            user_id_line = [line for line in text.split('\n') if 'ID:' in line][0]
+            user_id = int(user_id_line.split('ID:')[1].strip())  # Исправлено: split по 'ID:', strip для очистки
+            await bot.send_message(user_id, message.text)
+            await message.answer("Ответ отправлен пользователю.")
+            logging.info(f"Эксперт ответил пользователю {user_id}")
+        except IndexError:
+            await message.answer("Ошибка: не удалось найти строку с ID.")
+            logging.error("Ошибка: строка с ID не найдена в сообщении.")
+        except ValueError:
+            await message.answer("Ошибка: ID не является числом.")
+            logging.error("Ошибка: неверный формат ID.")
+        except Exception as e:
+            await message.answer("Ошибка: не удалось отправить ответ.")
+            logging.error(f"Ошибка ответа эксперта: {e}")
+
+# Финализация с БД (унифицировал ключи в info_dict)
 async def finalize_case(message: types.Message, state: FSMContext):
     data = await state.get_data()
+    if not data.get("category"):  # Валидация
+        await message.answer("Ошибка: данные неполные. Начните заново.")
+        await state.clear()
+        return
+
     photos = data.get("photos", [])
 
     info_dict = {}
@@ -314,8 +341,8 @@ async def finalize_case(message: types.Message, state: FSMContext):
         info_dict["Материал и вес"] = data['material_weight']
     if "book_info" in data:
         info_dict["Книга"] = data['book_info']
-    if "simple_info" in data:
-        info_dict["Дополнительно"] = data['simple_info']
+    if "additional_info" in data:
+        info_dict["Дополнительно"] = data['additional_info']
 
     app_number = save_application(
         user_id=message.from_user.id,
@@ -326,21 +353,24 @@ async def finalize_case(message: types.Message, state: FSMContext):
         info_dict=info_dict
     )
 
-    text = f"<b>Новая заявка №{app_number}</b>\n\n"
-    text += f"<b>Категория:</b> {data.get('category')}\n"
-    text += f"<b>Пользователь:</b> {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n"
-    text += f"<b>ID:</b> <code>{message.from_user.id}</code>\n\n"
+    text = f"Новая заявка №{app_number}\n\n"
+    text += f"Категория: {data.get('category')}\n"
+    text += f"Пользователь: {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n"
+    text += f"ID: {message.from_user.id}\n\n"
 
     for key, value in info_dict.items():
-        text += f"<b>{key}:</b> {value}\n"
+        text += f"{key}: {value}\n"
 
     try:
         await bot.send_message(EXPERT_ID, text)
         if photos:
-            for i, file_id in enumerate(photos):
-                await bot.send_photo(EXPERT_ID, file_id, caption=f"Заявка №{app_number} | Фото {i+1}")
+            media_group = [types.InputMediaPhoto(media=file_id) for file_id in photos]
+            media_group[0].caption = f"Заявка №{app_number} | Фото"
+            await bot.send_media_group(EXPERT_ID, media_group)
+        logging.info(f"Заявка №{app_number} отправлена эксперту от пользователя {message.from_user.id}")
     except Exception as e:
         logging.error(f"Ошибка отправки эксперту: {e}")
+        await message.answer("Ошибка при отправке заявки. Попробуйте позже.")
 
     await message.answer(
         "Спасибо большое! 🙏 Твоя заявка отправлена эксперту.\n"
@@ -349,6 +379,12 @@ async def finalize_case(message: types.Message, state: FSMContext):
         reply_markup=ReplyKeyboardRemove()
     )
     await state.clear()
+
+# Общий обработчик для invalid input в состояниях (опционально, но полезно)
+@dp.message(Form.photos)  # Для не-фото в photos
+async def invalid_in_photos(message: types.Message):
+    if not message.photo and message.text not in ["Отправить ещё фото", "Продолжить", "Отмена"]:
+        await message.answer("Пожалуйста, присылай фото или используй кнопки ниже.", reply_markup=photo_keyboard())
 
 # Запуск
 async def main():
