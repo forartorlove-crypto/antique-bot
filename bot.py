@@ -1,281 +1,398 @@
 # bot.py
 import logging
+import sqlite3
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.client.default import DefaultBotProperties
-from dotenv import load_dotenv   # ← эта строка
-import os                        # ← и эта
+from dotenv import load_dotenv
+import os
+from datetime import datetime
 
-load_dotenv()                    # ← эти две строки
+load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
 EXPERT_ID = int(os.getenv("EXPERT_ID"))
 
 import asyncio
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(filename='bot.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 bot = Bot(
-    token=API_TOKEN,             # ← используем переменную, а не строку с токеном
+    token=API_TOKEN,
     default=DefaultBotProperties(parse_mode="HTML")
 )
 dp = Dispatcher()
 
-# --- Состояния ---
-class Form(StatesGroup):
-    waiting_photos = State()       # Ожидание фото (в начале)
-    category = State()             # Выбор категории
-    # Автографы
-    autograph_known = State()
-    autograph_whose = State()
-    # Боны
-    bonds_type = State()
-    # ДПИ
-    material = State()
-    size_dpi = State()
-    marks = State()
-    weight = State()
-    # Живопись
-    size_painting = State()
-    technique_known = State()
-    russian_author = State()
-    clarification = State()
-    dating = State()
-    before_after_1917 = State()
-    # Финал
-    final = State()
+DB_FILE = "applications.db"
 
-# --- Клавиатуры ---
+# Инициализация базы данных
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            full_name TEXT,
+            category TEXT,
+            photos TEXT,
+            info TEXT,
+            timestamp TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Сохранить заявку в БД и вернуть номер
+def save_application(user_id, username, full_name, category, photos, info_dict):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    photos_str = ','.join(photos) if photos else ''
+    info_str = str(info_dict)
+    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    c.execute('''
+        INSERT INTO applications (user_id, username, full_name, category, photos, info, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, username or "нет", full_name, category, photos_str, info_str, timestamp))
+    conn.commit()
+    app_id = c.lastrowid
+    conn.close()
+    return app_id
+
+# Состояния
+class Form(StatesGroup):
+    category = State()
+    photos = State()
+    info = State()
+    technique = State()
+    size = State()
+    material_weight = State()
+    country_year = State()
+    book_info = State()
+    detailed_info = State()
+    preview = State()
+
+# Клавиатуры
 def category_keyboard():
     buttons = [
-        ["Автографы", "Антикварное оружие"],
-        ["Боны", "Декоративно прикладное искусство"],
-        ["Живопись", "Книги"],
-        ["Марки", "Медали"],
-        ["Монеты", "Открытки"],
-        ["Плакаты", "Фотографии"]
+        ["Автографы", "Боны"],
+        ["Декоративно-прикладное искусство", "Живопись"],
+        ["Книги", "Марки"],
+        ["Медали", "Монеты"],
+        ["Открытки", "Фотографии"]
     ]
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=text) for text in row] for row in buttons],
-                               resize_keyboard=True)
+    kb = [[KeyboardButton(text=text) for text in row] for row in buttons]
+    kb.append([KeyboardButton(text="Отмена")])
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-def yes_no_keyboard():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Да"), KeyboardButton(text="Нет")]],
-                               resize_keyboard=True)
-
-def material_keyboard():
+def photo_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Фарфор"), KeyboardButton(text="Бронза")],
-            [KeyboardButton(text="Серебро"), KeyboardButton(text="Дерево")],
-            [KeyboardButton(text="Другое")]
+            [KeyboardButton(text="Отправить ещё фото"), KeyboardButton(text="Продолжить")],
+            [KeyboardButton(text="Отмена")]
         ],
         resize_keyboard=True
     )
 
-# --- Старт ---
+def cancel_keyboard():
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Отмена")]], resize_keyboard=True)
+
+# Установка кнопки меню справа
+async def set_commands():
+    commands = [
+        BotCommand(command="start", description="Начать новую заявку на оценку")
+    ]
+    await bot.set_my_commands(commands)
+
+# Старт
 @dp.message(Command(commands=["start"]))
 async def start(message: types.Message, state: FSMContext):
-    await state.clear()  # На всякий случай
+    await state.clear()
     await message.answer(
-        "Привет! Этот бот поможет отправить заявку на оценку антиквариата.\n\n"
-        "Пожалуйста, сначала пришлите <b>фото предмета</b> (можно несколько).",
-        reply_markup=ReplyKeyboardRemove()
+        "Привет! 😊 Я помогу тебе отправить <b>один предмет</b> на оценку нашему эксперту по антиквариату.\n\n"
+        "Это займёт всего 2–3 минуты, и ты получишь предварительную оценку бесплатно.\n\n"
+        "Для начала выбери категорию предмета:",
+        reply_markup=category_keyboard()
     )
-    await state.set_state(Form.waiting_photos)
-
-# --- Ожидание фото ---
-@dp.message(Form.waiting_photos, F.photo)
-async def handle_photos(message: types.Message, state: FSMContext):
-    # Сохраняем фото
-    photos = (await state.get_data()).get("photos", [])
-    photos.append(message.photo[-1].file_id)  # Берем самое большое качество
-    await state.update_data(photos=photos)
-
-    await message.answer(f"Получено фото: {len(photos)}. Можно прислать ещё или выбрать категорию.",
-                         reply_markup=category_keyboard())
-
     await state.set_state(Form.category)
 
-@dp.message(Form.waiting_photos)
-async def photos_reminder(message: types.Message):
-    await message.answer("Пожалуйста, пришлите хотя бы одно фото предмета.")
+# Общая отмена
+@dp.message(F.text == "Отмена")
+async def cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Заявка отменена. Чтобы начать новую — нажми кнопку меню справа и выбери /start 😊", reply_markup=ReplyKeyboardRemove())
 
-# --- Выбор категории ---
+# Выбор категории
 @dp.message(Form.category)
 async def handle_category(message: types.Message, state: FSMContext):
-    # Список всех возможных категорий (точно как в кнопках)
-    VALID_CATEGORIES = {
-        "Автографы", "Антикварное оружие",
-        "Боны", "Декоративно прикладное искусство",
-        "Живопись", "Книги",
-        "Марки", "Медали",
-        "Монеты", "Открытки",
-        "Плакаты", "Фотографии"
-    }
+    if message.text == "Отмена":
+        return await cancel(message, state)
 
-    user_text = message.text.strip()
-
-    if user_text not in VALID_CATEGORIES:
-        await message.answer("Пожалуйста, выберите категорию, нажав на одну из кнопок ниже:", 
-                             reply_markup=category_keyboard())
+    category = message.text.strip()
+    valid_categories = [
+        "Автографы", "Боны", "Декоративно-прикладное искусство", "Живопись",
+        "Книги", "Марки", "Медали", "Монеты", "Открытки", "Фотографии"
+    ]
+    if category not in valid_categories:
+        await message.answer("Выбери, пожалуйста, категорию из предложенных ниже 👇", reply_markup=category_keyboard())
         return
 
-    # Сохраняем категорию
-    await state.update_data(category=user_text)
+    await state.update_data(category=category, photos=[])
 
-    # Теперь логика по категориям
-    if user_text == "Автографы":
-        await message.answer("Известен ли чей автограф?", reply_markup=yes_no_keyboard())
-        await state.set_state(Form.autograph_known)
+    photo_prompt = "📸 Чтобы эксперт мог дать точную оценку, пришли фото в хорошем качестве и при дневном освещении (без вспышки).\n\n"
 
-    elif user_text == "Антикварное оружие":
-        await finalize_case(message, state)
+    if category == "Автографы":
+        photo_prompt += "Сфотографируй общий вид предмета и отдельно крупно сам автограф."
+    elif category == "Боны":
+        photo_prompt += "Сфотографируй банкноту с двух сторон."
+    elif category == "Живопись":
+        photo_prompt += "Сделай общее фото картины, фото обратной стороны и крупно подпись (если она есть)."
+    elif category == "Марки":
+        photo_prompt += "Сфотографируй марки крупно с двух сторон. Если они в альбоме — пришли фото страниц."
+    elif category == "Монеты":
+        photo_prompt += "Сфотографируй монету с двух сторон и отдельно ребро (если там есть надписи)."
+    elif category == "Декоративно-прикладное искусство":
+        photo_prompt += "Сфотографируй предмет со всех сторон, снизу, клеймо или подпись (если есть) и все дефекты."
+    elif category == "Книги":
+        photo_prompt += "Сделай общие фото книги, титульный лист, страницы с надписями и дефектами."
+    elif category == "Медали":
+        photo_prompt += "Сфотографируй медаль с двух сторон."
+    elif category == "Открытки":
+        photo_prompt += "Сфотографируй открытку с двух сторон."
+    elif category == "Фотографии":
+        photo_prompt += "Сфотографируй фотографию с двух сторон."
 
-    elif user_text == "Боны":
-        await message.answer("Боны российские или иностранные?\n(напишите ответ текстом)", 
-                             reply_markup=ReplyKeyboardRemove())
-        await state.set_state(Form.bonds_type)
+    await message.answer(photo_prompt + "\n\nПрисылай фото. Когда закончишь — нажми «Продолжить».", reply_markup=photo_keyboard())
+    await state.set_state(Form.photos)
 
-    elif user_text == "Декоративно прикладное искусство":
-        await message.answer("Выберите материал:", reply_markup=material_keyboard())
-        await state.set_state(Form.material)
-
-    elif user_text == "Живопись":
-        await message.answer("Введите размер картины (например: 50x70 см):", 
-                             reply_markup=ReplyKeyboardRemove())
-        await state.set_state(Form.size_painting)
-
-    else:  # Все остальные категории — сразу отправляем эксперту
-        await finalize_case(message, state)
-# --- Автографы ---
-@dp.message(Form.autograph_known)
-async def autograph_known(message: types.Message, state: FSMContext):
-    await state.update_data(autograph_known=message.text)
-    if message.text == "Да":
-        await message.answer("Чей автограф?")
-        await state.set_state(Form.autograph_whose)
-    else:
-        await finalize_case(message, state)
-
-@dp.message(Form.autograph_whose)
-async def autograph_whose(message: types.Message, state: FSMContext):
-    await state.update_data(autograph_whose=message.text)
-    await finalize_case(message, state)
-
-# --- Боны ---
-@dp.message(Form.bonds_type)
-async def bonds_type(message: types.Message, state: FSMContext):
-    await state.update_data(bonds_type=message.text)
-    await finalize_case(message, state)
-
-# --- ДПИ ---
-@dp.message(Form.material)
-async def dpi_material(message: types.Message, state: FSMContext):
-    await state.update_data(material=message.text)
-    await message.answer("Введите размер предмета (например: высота 20 см):")
-    await state.set_state(Form.size_dpi)
-
-@dp.message(Form.size_dpi)
-async def dpi_size(message: types.Message, state: FSMContext):
-    await state.update_data(size=message.text)
-    await message.answer("Есть ли клейма, подписи, маркировки?", reply_markup=yes_no_keyboard())
-    await state.set_state(Form.marks)
-
-@dp.message(Form.marks)
-async def dpi_marks(message: types.Message, state: FSMContext):
-    await state.update_data(marks=message.text)
+# Сбор фото
+@dp.message(Form.photos, F.photo)
+async def handle_photos(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if data.get("material") == "Серебро":
-        await message.answer("Укажите вес (в граммах):")
-        await state.set_state(Form.weight)
-    else:
-        await finalize_case(message, state)
+    photos = data.get("photos", [])
+    photos.append(message.photo[-1].file_id)
+    await state.update_data(photos=photos)
+    await message.answer("Фото получено! 📸 Присылай ещё или нажми «Продолжить».", reply_markup=photo_keyboard())
 
-@dp.message(Form.weight)
-async def dpi_weight(message: types.Message, state: FSMContext):
-    await state.update_data(weight=message.text)
-    await finalize_case(message, state)
+@dp.message(Form.photos, F.text == "Отправить ещё фото")
+async def send_more_photos(message: types.Message):
+    await message.answer("Хорошо, присылай ещё фото в хорошем качестве.", reply_markup=photo_keyboard())
 
-# --- Живопись ---
-@dp.message(Form.size_painting)
-async def painting_size(message: types.Message, state: FSMContext):
+@dp.message(Form.photos, F.text == "Продолжить")
+async def photos_continue(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+
+    if len(photos) == 0:
+        await message.answer("Пожалуйста, пришли хотя бы одно фото, чтобы эксперт мог оценить предмет.", reply_markup=photo_keyboard())
+        return
+
+    total_photos = len(photos)
+    await message.answer(f"Получено {total_photos} фото. Отлично! Теперь перейдём к вопросам.", reply_markup=cancel_keyboard())
+
+    category = data["category"]
+
+    if category in ["Автографы", "Марки", "Медали", "Открытки", "Фотографии"]:
+        await message.answer("Расскажи, пожалуйста, всё, что знаешь о предмете (страна, год, автор, состояние и т.д.).", reply_markup=cancel_keyboard())
+        await state.set_state(Form.info)
+
+    elif category == "Боны":
+        await message.answer("Укажи страну и год выпуска, если знаешь.", reply_markup=cancel_keyboard())
+        await state.set_state(Form.country_year)
+
+    elif category == "Живопись":
+        await message.answer("Какая техника исполнения (масло, акварель, гуашь и т.д.)?", reply_markup=cancel_keyboard())
+        await state.set_state(Form.technique)
+
+    elif category == "Монеты":
+        await message.answer("Из какого материала монета и какой вес (если знаешь)?", reply_markup=cancel_keyboard())
+        await state.set_state(Form.material_weight)
+
+    elif category == "Декоративно-прикладное искусство":
+        await message.answer("Какой размер предмета и из какого материала он сделан?", reply_markup=cancel_keyboard())
+        await state.set_state(Form.size)
+
+    elif category == "Книги":
+        await message.answer("Название книги, автор и год издания?", reply_markup=cancel_keyboard())
+        await state.set_state(Form.book_info)
+
+# Обработка вопросов
+@dp.message(Form.info)
+async def handle_simple_info(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        return await cancel(message, state)
+    await state.update_data(simple_info=message.text)
+    await show_preview(message, state)
+
+@dp.message(Form.country_year)
+async def handle_country_year(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        return await cancel(message, state)
+    await state.update_data(country_year=message.text)
+    await message.answer("Есть ещё какая-то информация о боне?", reply_markup=cancel_keyboard())
+    await state.set_state(Form.info)
+
+@dp.message(Form.technique)
+async def handle_technique(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        return await cancel(message, state)
+    await state.update_data(technique=message.text)
+    await message.answer("Какой размер картины (в сантиметрах)?", reply_markup=cancel_keyboard())
+    await state.set_state(Form.size)
+
+@dp.message(Form.size)
+async def handle_size(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        return await cancel(message, state)
     await state.update_data(size=message.text)
-    await message.answer("Известна ли техника исполнения или автор?", reply_markup=yes_no_keyboard())
-    await state.set_state(Form.technique_known)
+    category = (await state.get_data())["category"]
+    if category == "Живопись":
+        await message.answer("Расскажи подробнее: страна, автор, как картина к тебе попала, другая известная информация.", reply_markup=cancel_keyboard())
+        await state.set_state(Form.detailed_info)
+    else:
+        await message.answer("Есть ещё какая-то информация о предмете?", reply_markup=cancel_keyboard())
+        await state.set_state(Form.info)
 
-@dp.message(Form.technique_known)
-async def painting_technique(message: types.Message, state: FSMContext):
-    await state.update_data(technique_known=message.text)
-    await message.answer("Автор русский?", reply_markup=yes_no_keyboard())
-    await state.set_state(Form.russian_author)
+@dp.message(Form.detailed_info)
+async def handle_detailed_info(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        return await cancel(message, state)
+    await state.update_data(detailed_info=message.text)
+    await show_preview(message, state)
 
-@dp.message(Form.russian_author)
-async def painting_russian(message: types.Message, state: FSMContext):
-    await state.update_data(russian_author=message.text)
-    await message.answer("Уточнение по автору, технике, подписи и т.д.:")
-    await state.set_state(Form.clarification)
+@dp.message(Form.material_weight)
+async def handle_material_weight(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        return await cancel(message, state)
+    await state.update_data(material_weight=message.text)
+    await message.answer("Есть ещё какая-то информация о монете?", reply_markup=cancel_keyboard())
+    await state.set_state(Form.info)
 
-@dp.message(Form.clarification)
-async def painting_clarification(message: types.Message, state: FSMContext):
-    await state.update_data(clarification=message.text)
-    await message.answer("Датировка (если известна):")
-    await state.set_state(Form.dating)
+@dp.message(Form.book_info)
+async def handle_book_info(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        return await cancel(message, state)
+    await state.update_data(book_info=message.text)
+    await show_preview(message, state)
 
-@dp.message(Form.dating)
-async def painting_dating(message: types.Message, state: FSMContext):
-    await state.update_data(dating=message.text)
-    await message.answer("Работа до 1917 года или после?")
-    await state.set_state(Form.before_after_1917)
+# Предпросмотр
+async def show_preview(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    photos_count = len(data.get("photos", []))
 
-@dp.message(Form.before_after_1917)
-async def painting_period(message: types.Message, state: FSMContext):
-    await state.update_data(before_after_1917=message.text)
-    await finalize_case(message, state)
+    preview_text = "<b>Проверь заявку перед отправкой:</b>\n\n"
+    preview_text += f"<b>Категория:</b> {data.get('category')}\n"
+    preview_text += f"<b>Фото:</b> {photos_count} шт.\n\n"
 
-# --- Финализация и отправка эксперту ---
+    if "country_year" in data:
+        preview_text += f"<b>Страна и год:</b> {data['country_year']}\n"
+    if "technique" in data:
+        preview_text += f"<b>Техника:</b> {data['technique']}\n"
+    if "size" in data:
+        preview_text += f"<b>Размер:</b> {data['size']}\n"
+    if "detailed_info" in data:
+        preview_text += f"<b>Подробная информация:</b> {data['detailed_info']}\n"
+    if "material_weight" in data:
+        preview_text += f"<b>Материал и вес:</b> {data['material_weight']}\n"
+    if "book_info" in data:
+        preview_text += f"<b>Книга:</b> {data['book_info']}\n"
+    if "simple_info" in data:
+        preview_text += f"<b>Дополнительно:</b> {data['simple_info']}\n"
+
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Отправить заявку ✅", callback_data="send_application"))
+    keyboard.add(InlineKeyboardButton("Добавить ещё фото или информацию", callback_data="add_more"))
+    keyboard.add(InlineKeyboardButton("Отмена ❌", callback_data="cancel_application"))
+
+    await message.answer(preview_text, reply_markup=keyboard)
+    await state.set_state(Form.preview)
+
+# Кнопки предпросмотра
+@dp.callback_query(Form.preview, F.data == "send_application")
+async def send_application(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await finalize_case(callback.message, state)
+    await callback.answer()
+
+@dp.callback_query(Form.preview, F.data == "add_more")
+async def add_more(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("Присылай дополнительные фото или информацию. Когда будет готово — я снова покажу предпросмотр.", reply_markup=photo_keyboard())
+    await state.set_state(Form.photos)
+    await callback.answer()
+
+@dp.callback_query(Form.preview, F.data == "cancel_application")
+async def cancel_preview(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await cancel(callback.message, state)
+    await callback.answer()
+
+# Финализация с БД
 async def finalize_case(message: types.Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
 
-    text = "<b>Новая заявка на оценку</b>\n\n"
-    text += f"<b>Категория:</b> {data.get('category', 'Не указана')}\n"
-    text += f"<b>От кого:</b> {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n"
-    text += f"<b>ID пользователя:</b> <code>{message.from_user.id}</code>\n\n"
+    info_dict = {}
+    if "country_year" in data:
+        info_dict["Страна и год"] = data['country_year']
+    if "technique" in data:
+        info_dict["Техника"] = data['technique']
+    if "size" in data:
+        info_dict["Размер"] = data['size']
+    if "detailed_info" in data:
+        info_dict["Подробно"] = data['detailed_info']
+    if "material_weight" in data:
+        info_dict["Материал и вес"] = data['material_weight']
+    if "book_info" in data:
+        info_dict["Книга"] = data['book_info']
+    if "simple_info" in data:
+        info_dict["Дополнительно"] = data['simple_info']
 
-    # Добавляем все ответы
-    answers = {
-        "Автограф известен": data.get("autograph_known"),
-        "Чей автограф": data.get("autograph_whose"),
-        "Тип бон": data.get("bonds_type"),
-        "Материал": data.get("material"),
-        "Размер": data.get("size"),
-        "Клейма/подписи": data.get("marks"),
-        "Вес": data.get("weight"),
-        "Техника/автор известны": data.get("technique_known"),
-        "Русский автор": data.get("russian_author"),
-        "Уточнение": data.get("clarification"),
-        "Датировка": data.get("dating"),
-        "Период": data.get("before_after_1917"),
-    }
-    for key, value in answers.items():
-        if value:
-            text += f"<b>{key}:</b> {value}\n"
+    app_number = save_application(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        full_name=message.from_user.full_name,
+        category=data.get('category'),
+        photos=photos,
+        info_dict=info_dict
+    )
 
-    # Отправляем эксперту
-    await bot.send_message(EXPERT_ID, text)
-    if photos:
-        for i, file_id in enumerate(photos):
-            await bot.send_photo(EXPERT_ID, file_id, caption="Фото предмета" if i == 0 else "")
+    text = f"<b>Новая заявка №{app_number}</b>\n\n"
+    text += f"<b>Категория:</b> {data.get('category')}\n"
+    text += f"<b>Пользователь:</b> {message.from_user.full_name} (@{message.from_user.username or 'нет'})\n"
+    text += f"<b>ID:</b> <code>{message.from_user.id}</code>\n\n"
 
-    await message.answer("Спасибо! Ваша заявка отправлена эксперту. Ожидайте ответа в ближайшее время.", 
-                         reply_markup=ReplyKeyboardRemove())
+    for key, value in info_dict.items():
+        text += f"<b>{key}:</b> {value}\n"
+
+    try:
+        await bot.send_message(EXPERT_ID, text)
+        if photos:
+            for i, file_id in enumerate(photos):
+                await bot.send_photo(EXPERT_ID, file_id, caption=f"Заявка №{app_number} | Фото {i+1}")
+    except Exception as e:
+        logging.error(f"Ошибка отправки эксперту: {e}")
+
+    await message.answer(
+        "Спасибо большое! 🙏 Твоя заявка отправлена эксперту.\n"
+        "Он изучит фото и информацию и скоро напишет тебе ответ.\n"
+        "Хорошего дня! ☀️",
+        reply_markup=ReplyKeyboardRemove()
+    )
     await state.clear()
 
-# --- Запуск ---
+# Запуск
 async def main():
-    await dp.start_polling(bot)
+    await set_commands()
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logging.error(f"Критическая ошибка бота: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
